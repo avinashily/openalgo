@@ -29,45 +29,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger("OptionProfitBooker")
 
+# --- Configuration Constants (Environment Variables) ---
+API_KEY = os.getenv('OPENALGO_APIKEY')
+HOST = os.getenv('HOST_SERVER', 'http://127.0.0.1:5000')
+WS_URL = os.getenv('WEBSOCKET_URL', 'ws://127.0.0.1:8765')
+
+try:
+    PROFIT_PERCENTAGE_NEAR = float(os.getenv('PROFIT_PERCENTAGE_NEAR', 4.0))
+except ValueError:
+    logger.warning("Invalid PROFIT_PERCENTAGE_NEAR, defaulting to 4.0")
+    PROFIT_PERCENTAGE_NEAR = 4.0
+
+try:
+    PROFIT_PERCENTAGE_FAR = float(os.getenv('PROFIT_PERCENTAGE_FAR', 10.0))
+except ValueError:
+    logger.warning("Invalid PROFIT_PERCENTAGE_FAR, defaulting to 10.0")
+    PROFIT_PERCENTAGE_FAR = 10.0
+
+try:
+    POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 30))
+except ValueError:
+    logger.warning("Invalid POLL_INTERVAL, defaulting to 30")
+    POLL_INTERVAL = 30
+
+try:
+    QUANTITY_THRESHOLD = int(os.getenv('QUANTITY_THRESHOLD', 300))
+except ValueError:
+    logger.warning("Invalid QUANTITY_THRESHOLD, defaulting to 300")
+    QUANTITY_THRESHOLD = 300
+
+try:
+    PROFIT_POINTS_THRESHOLD = float(os.getenv('PROFIT_POINTS_THRESHOLD', 200.0))
+except ValueError:
+    logger.warning("Invalid PROFIT_POINTS_THRESHOLD, defaulting to 200.0")
+    PROFIT_POINTS_THRESHOLD = 200.0
+
+# -------------------------------------------------------
+
 class OptionProfitBooker:
     def __init__(self):
-        # Configuration
-        self.api_key = os.getenv('OPENALGO_APIKEY')
-        self.host = os.getenv('HOST_SERVER', 'http://127.0.0.1:5000')
-        self.ws_url = os.getenv('WEBSOCKET_URL', 'ws://127.0.0.1:8765')
-
-        # Configurable parameters
-        try:
-            self.profit_percentage_near = float(os.getenv('PROFIT_PERCENTAGE_NEAR', 4.0))
-        except ValueError:
-            logger.warning("Invalid PROFIT_PERCENTAGE_NEAR, defaulting to 4.0")
-            self.profit_percentage_near = 4.0
-
-        try:
-            self.profit_percentage_far = float(os.getenv('PROFIT_PERCENTAGE_FAR', 10.0))
-        except ValueError:
-            logger.warning("Invalid PROFIT_PERCENTAGE_FAR, defaulting to 10.0")
-            self.profit_percentage_far = 10.0
-
-        try:
-            self.poll_interval = int(os.getenv('POLL_INTERVAL', 30))
-        except ValueError:
-            logger.warning("Invalid POLL_INTERVAL, defaulting to 30")
-            self.poll_interval = 30
-
-        try:
-            self.quantity_threshold = int(os.getenv('QUANTITY_THRESHOLD', 300))
-        except ValueError:
-            logger.warning("Invalid QUANTITY_THRESHOLD, defaulting to 300")
-            self.quantity_threshold = 300
-
-        try:
-            self.profit_points_threshold = float(os.getenv('PROFIT_POINTS_THRESHOLD', 200.0))
-        except ValueError:
-            logger.warning("Invalid PROFIT_POINTS_THRESHOLD, defaulting to 200.0")
-            self.profit_points_threshold = 200.0
-
-        if not self.api_key:
+        if not API_KEY:
             logger.error("OPENALGO_APIKEY environment variable not set")
             sys.exit(1)
 
@@ -101,26 +102,28 @@ class OptionProfitBooker:
         match = self.symbol_regex.match(symbol)
         if not match:
             # Fallback to near target
-            return avg_price * (1 + self.profit_percentage_near / 100)
+            return avg_price * (1 + PROFIT_PERCENTAGE_NEAR / 100)
 
         expiry_str = match.group(2)
         try:
-            expiry_date = datetime.strptime(expiry_str, "%d%b%y")
+            # Convert to Title Case for strptime %b (e.g., "31JUL25" -> "31Jul25")
+            expiry_str_title = expiry_str[:2] + expiry_str[2:5].title() + expiry_str[5:]
+            expiry_date = datetime.strptime(expiry_str_title, "%d%b%y")
             days_to_expiry = (expiry_date - datetime.now()).days
         except ValueError:
-            return avg_price * (1 + self.profit_percentage_near / 100)
+            return avg_price * (1 + PROFIT_PERCENTAGE_NEAR / 100)
 
         # Calculate standard percentage-based target
         if days_to_expiry <= 30:
-            target_price = avg_price * (1 + self.profit_percentage_near / 100)
+            target_price = avg_price * (1 + PROFIT_PERCENTAGE_NEAR / 100)
         else:
             # Far expiry logic
-            target_pct_price = avg_price * (1 + self.profit_percentage_far / 100)
+            target_pct_price = avg_price * (1 + PROFIT_PERCENTAGE_FAR / 100)
 
             # Check for special condition: Qty > 300 AND Time >= 15:00
             now = datetime.now()
-            if qty > self.quantity_threshold and now.hour >= 15:
-                target_pts_price = avg_price + self.profit_points_threshold
+            if qty > QUANTITY_THRESHOLD and now.hour >= 15:
+                target_pts_price = avg_price + PROFIT_POINTS_THRESHOLD
                 # Take the lower of the two targets (conservative booking)
                 target_price = min(target_pct_price, target_pts_price)
                 logger.debug(f"Special condition for {symbol}: Min({target_pct_price}, {target_pts_price}) = {target_price}")
@@ -132,8 +135,8 @@ class OptionProfitBooker:
     def get_positions(self):
         """Fetch current positions from API"""
         try:
-            url = f"{self.host}/api/v1/positionbook"
-            payload = {"apikey": self.api_key}
+            url = f"{HOST}/api/v1/positionbook"
+            payload = {"apikey": API_KEY}
             response = requests.post(url, json=payload, headers=self.headers, timeout=10)
 
             if response.status_code == 200:
@@ -152,8 +155,8 @@ class OptionProfitBooker:
     def get_open_orders(self):
         """Fetch open orders from API"""
         try:
-            url = f"{self.host}/api/v1/orderbook"
-            payload = {"apikey": self.api_key}
+            url = f"{HOST}/api/v1/orderbook"
+            payload = {"apikey": API_KEY}
             response = requests.post(url, json=payload, headers=self.headers, timeout=10)
 
             if response.status_code == 200:
@@ -171,9 +174,9 @@ class OptionProfitBooker:
     def cancel_order(self, order_id):
         """Cancel a specific order"""
         try:
-            url = f"{self.host}/api/v1/cancelorder"
+            url = f"{HOST}/api/v1/cancelorder"
             payload = {
-                "apikey": self.api_key,
+                "apikey": API_KEY,
                 "orderid": order_id
             }
             response = requests.post(url, json=payload, headers=self.headers, timeout=10)
@@ -190,10 +193,10 @@ class OptionProfitBooker:
     def place_sell_order(self, symbol, exchange, quantity, product, price_type="MARKET", price=0):
         """Place a SELL order (Market or Limit)"""
         try:
-            url = f"{self.host}/api/v1/placeorder"
+            url = f"{HOST}/api/v1/placeorder"
             # Standard OpenAlgo API payload
             payload = {
-                "apikey": self.api_key,
+                "apikey": API_KEY,
                 "strategy": "OptionProfitBooker",
                 "symbol": symbol,
                 "action": "SELL",
@@ -221,15 +224,15 @@ class OptionProfitBooker:
         """Websocket client handler"""
         while self.running:
             try:
-                logger.info(f"Connecting to WebSocket: {self.ws_url}")
-                async with websockets.connect(self.ws_url) as websocket:
+                logger.info(f"Connecting to WebSocket: {WS_URL}")
+                async with websockets.connect(WS_URL) as websocket:
                     self.ws_connected = True
                     logger.info("WebSocket Connected")
 
                     # Authenticate
                     auth_msg = {
                         "action": "authenticate",
-                        "api_key": self.api_key
+                        "api_key": API_KEY
                     }
                     await websocket.send(json.dumps(auth_msg))
 
@@ -407,6 +410,7 @@ class OptionProfitBooker:
                                     self.tracked_positions[symbol]['buy_avg'] = pos.get('buyavg') or pos.get('buy_avg')
                             else:
                                 # New position
+                                # target = self.get_target_profit(symbol) # Deprecated, dynamic calculation
                                 self.tracked_positions[symbol] = {
                                     'symbol': symbol,
                                     'exchange': pos.get('exchange'),
@@ -441,7 +445,7 @@ class OptionProfitBooker:
             except Exception as e:
                 logger.error(f"Error in position poller: {e}")
 
-            time.sleep(self.poll_interval)
+            time.sleep(POLL_INTERVAL)
 
     def start(self):
         """Start threads"""
