@@ -3,6 +3,7 @@
 Option Profit Booker Strategy
 Fetches option buying open positions and books profit if > target% based on market depth.
 Target % depends on expiry: <= 30 days (4%), > 30 days (10%).
+Also supports profit booking based on points for large quantities post 3:00 PM.
 """
 import os
 import sys
@@ -54,6 +55,18 @@ class OptionProfitBooker:
             logger.warning("Invalid POLL_INTERVAL, defaulting to 30")
             self.poll_interval = 30
 
+        try:
+            self.quantity_threshold = int(os.getenv('QUANTITY_THRESHOLD', 300))
+        except ValueError:
+            logger.warning("Invalid QUANTITY_THRESHOLD, defaulting to 300")
+            self.quantity_threshold = 300
+
+        try:
+            self.profit_points_threshold = float(os.getenv('PROFIT_POINTS_THRESHOLD', 200.0))
+        except ValueError:
+            logger.warning("Invalid PROFIT_POINTS_THRESHOLD, defaulting to 200.0")
+            self.profit_points_threshold = 200.0
+
         if not self.api_key:
             logger.error("OPENALGO_APIKEY environment variable not set")
             sys.exit(1)
@@ -73,28 +86,48 @@ class OptionProfitBooker:
         # Symbol parser regex (DDMMMYY)
         self.symbol_regex = re.compile(r'^([A-Z0-9]+)(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$')
 
-    def get_target_profit(self, symbol):
+    def get_effective_target_price(self, position):
         """
-        Calculate target profit percentage based on expiry date.
-        Format expected: SYMBOL + DDMMMYY + Strike + OptionType
-        Example: NIFTY31JUL2523800CE
+        Calculate effective target price based on expiry, time, and quantity.
         """
-        try:
-            match = self.symbol_regex.match(symbol)
-            if match:
-                expiry_str = match.group(2)
-                expiry_date = datetime.strptime(expiry_str, "%d%b%y")
-                days_to_expiry = (expiry_date - datetime.now()).days
+        symbol = position['symbol']
+        avg_price = float(position.get('buy_avg', 0)) or float(position.get('avg_price', 0))
+        qty = position.get('quantity', 0)
 
-                target = self.profit_percentage_near if days_to_expiry <= 30 else self.profit_percentage_far
-                logger.info(f"Symbol {symbol}: Expiry {expiry_str} ({days_to_expiry} days) -> Target {target}%")
-                return target
+        if avg_price <= 0:
+            return None
+
+        # Parse expiry
+        match = self.symbol_regex.match(symbol)
+        if not match:
+            # Fallback to near target
+            return avg_price * (1 + self.profit_percentage_near / 100)
+
+        expiry_str = match.group(2)
+        try:
+            expiry_date = datetime.strptime(expiry_str, "%d%b%y")
+            days_to_expiry = (expiry_date - datetime.now()).days
+        except ValueError:
+            return avg_price * (1 + self.profit_percentage_near / 100)
+
+        # Calculate standard percentage-based target
+        if days_to_expiry <= 30:
+            target_price = avg_price * (1 + self.profit_percentage_near / 100)
+        else:
+            # Far expiry logic
+            target_pct_price = avg_price * (1 + self.profit_percentage_far / 100)
+
+            # Check for special condition: Qty > 300 AND Time >= 15:00
+            now = datetime.now()
+            if qty > self.quantity_threshold and now.hour >= 15:
+                target_pts_price = avg_price + self.profit_points_threshold
+                # Take the lower of the two targets (conservative booking)
+                target_price = min(target_pct_price, target_pts_price)
+                logger.debug(f"Special condition for {symbol}: Min({target_pct_price}, {target_pts_price}) = {target_price}")
             else:
-                logger.warning(f"Could not parse expiry from symbol {symbol}. Defaulting to near target.")
-                return self.profit_percentage_near
-        except Exception as e:
-            logger.error(f"Error calculating target profit for {symbol}: {e}")
-            return self.profit_percentage_near
+                target_price = target_pct_price
+
+        return target_price
 
     def get_positions(self):
         """Fetch current positions from API"""
@@ -154,8 +187,8 @@ class OptionProfitBooker:
             logger.error(f"Exception cancelling order {order_id}: {e}")
             return False
 
-    def place_sell_order(self, symbol, exchange, quantity, product):
-        """Place a SELL MARKET order"""
+    def place_sell_order(self, symbol, exchange, quantity, product, price_type="MARKET", price=0):
+        """Place a SELL order (Market or Limit)"""
         try:
             url = f"{self.host}/api/v1/placeorder"
             # Standard OpenAlgo API payload
@@ -165,17 +198,17 @@ class OptionProfitBooker:
                 "symbol": symbol,
                 "action": "SELL",
                 "exchange": exchange,
-                "price_type": "MARKET",
+                "price_type": price_type,
                 "product": product,
                 "quantity": quantity,
-                "price": 0,
+                "price": price,
                 "trigger_price": 0,
                 "disclosed_quantity": 0
             }
 
             response = requests.post(url, json=payload, headers=self.headers, timeout=10)
             if response.status_code == 200:
-                logger.info(f"Placed SELL order for {quantity} {symbol}")
+                logger.info(f"Placed SELL {price_type} order for {quantity} {symbol} at {price}")
                 return True
             else:
                 logger.error(f"Failed to place SELL order for {symbol}: {response.text}")
@@ -282,26 +315,25 @@ class OptionProfitBooker:
                     position = self.tracked_positions.get(symbol)
 
                 if position and not position.get('processing', False):
-                    avg_price = float(position.get('buy_avg', 0)) or float(position.get('avg_price', 0))
+                    # Calculate dynamic target price
+                    target_price = self.get_effective_target_price(position)
 
-                    if avg_price <= 0:
-                        return
+                    if target_price and best_bid >= target_price:
+                        # Use Limit order logic if using the "points" condition or standard limit booking
+                        # User requested limit order booking for this condition.
+                        # We will use LIMIT order at Best Bid to ensure we book at this price or better.
 
-                    profit_pct = ((best_bid - avg_price) / avg_price) * 100
-                    target_profit = position.get('target_profit', self.profit_percentage_near)
-
-                    if profit_pct >= target_profit:
-                        logger.info(f"PROFIT TARGET REACHED for {symbol}: {profit_pct:.2f}% (Target: {target_profit}%, Bid: {best_bid}, Avg: {avg_price})")
+                        logger.info(f"PROFIT TARGET REACHED for {symbol}: Bid {best_bid} >= Target {target_price}")
                         # Mark as processing IMMEDIATELY to prevent double triggering
                         position['processing'] = True
 
                         # Run blocking call in thread executor
-                        await asyncio.to_thread(self.book_profit, position)
+                        await asyncio.to_thread(self.book_profit, position, best_bid)
 
         except Exception as e:
             logger.error(f"Error processing message: {e}")
 
-    def book_profit(self, position):
+    def book_profit(self, position, limit_price):
         """Execute profit booking logic (Runs in thread)"""
         symbol = position['symbol']
         exchange = position['exchange']
@@ -320,9 +352,10 @@ class OptionProfitBooker:
                     self.cancel_order(order.get('orderid'))
                     time.sleep(0.5) # Wait for cancellation
 
-            # 2. Place SELL MARKET order
+            # 2. Place SELL LIMIT order
             if quantity > 0:
-                success = self.place_sell_order(symbol, exchange, quantity, product)
+                success = self.place_sell_order(symbol, exchange, quantity, product,
+                                              price_type="LIMIT", price=limit_price)
                 if success:
                     logger.info(f"Profit booked for {symbol}. Removed from tracking.")
                     # Remove from tracking immediately after success
@@ -374,17 +407,15 @@ class OptionProfitBooker:
                                     self.tracked_positions[symbol]['buy_avg'] = pos.get('buyavg') or pos.get('buy_avg')
                             else:
                                 # New position
-                                target = self.get_target_profit(symbol)
                                 self.tracked_positions[symbol] = {
                                     'symbol': symbol,
                                     'exchange': pos.get('exchange'),
                                     'product': pos.get('product'),
                                     'quantity': qty,
                                     'buy_avg': pos.get('buyavg') or pos.get('buy_avg'),
-                                    'target_profit': target,
                                     'processing': False
                                 }
-                                logger.info(f"New position detected: {symbol} (Qty: {qty}, Target: {target}%)")
+                                logger.info(f"New position detected: {symbol} (Qty: {qty})")
                                 self.sub_queue.put({
                                     'action': 'subscribe',
                                     'symbol': symbol,
