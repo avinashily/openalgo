@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """
 Option Profit Booker Strategy
-Fetches option buying open positions and books profit if > 10% based on market depth.
+Fetches option buying open positions and books profit if > target% based on market depth.
+Target % depends on expiry: <= 30 days (4%), > 30 days (10%).
 """
 import os
 import sys
@@ -13,6 +14,7 @@ import requests
 import logging
 import websockets
 import queue
+import re
 from datetime import datetime
 
 # Configure logging
@@ -35,10 +37,16 @@ class OptionProfitBooker:
 
         # Configurable parameters
         try:
-            self.profit_percentage = float(os.getenv('PROFIT_PERCENTAGE', 10.0))
+            self.profit_percentage_near = float(os.getenv('PROFIT_PERCENTAGE_NEAR', 4.0))
         except ValueError:
-            logger.warning("Invalid PROFIT_PERCENTAGE, defaulting to 10.0")
-            self.profit_percentage = 10.0
+            logger.warning("Invalid PROFIT_PERCENTAGE_NEAR, defaulting to 4.0")
+            self.profit_percentage_near = 4.0
+
+        try:
+            self.profit_percentage_far = float(os.getenv('PROFIT_PERCENTAGE_FAR', 10.0))
+        except ValueError:
+            logger.warning("Invalid PROFIT_PERCENTAGE_FAR, defaulting to 10.0")
+            self.profit_percentage_far = 10.0
 
         try:
             self.poll_interval = int(os.getenv('POLL_INTERVAL', 30))
@@ -61,6 +69,32 @@ class OptionProfitBooker:
         self.headers = {
             'Content-Type': 'application/json'
         }
+
+        # Symbol parser regex (DDMMMYY)
+        self.symbol_regex = re.compile(r'^([A-Z0-9]+)(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$')
+
+    def get_target_profit(self, symbol):
+        """
+        Calculate target profit percentage based on expiry date.
+        Format expected: SYMBOL + DDMMMYY + Strike + OptionType
+        Example: NIFTY31JUL2523800CE
+        """
+        try:
+            match = self.symbol_regex.match(symbol)
+            if match:
+                expiry_str = match.group(2)
+                expiry_date = datetime.strptime(expiry_str, "%d%b%y")
+                days_to_expiry = (expiry_date - datetime.now()).days
+
+                target = self.profit_percentage_near if days_to_expiry <= 30 else self.profit_percentage_far
+                logger.info(f"Symbol {symbol}: Expiry {expiry_str} ({days_to_expiry} days) -> Target {target}%")
+                return target
+            else:
+                logger.warning(f"Could not parse expiry from symbol {symbol}. Defaulting to near target.")
+                return self.profit_percentage_near
+        except Exception as e:
+            logger.error(f"Error calculating target profit for {symbol}: {e}")
+            return self.profit_percentage_near
 
     def get_positions(self):
         """Fetch current positions from API"""
@@ -254,9 +288,10 @@ class OptionProfitBooker:
                         return
 
                     profit_pct = ((best_bid - avg_price) / avg_price) * 100
+                    target_profit = position.get('target_profit', self.profit_percentage_near)
 
-                    if profit_pct >= self.profit_percentage:
-                        logger.info(f"PROFIT TARGET REACHED for {symbol}: {profit_pct:.2f}% (Bid: {best_bid}, Avg: {avg_price})")
+                    if profit_pct >= target_profit:
+                        logger.info(f"PROFIT TARGET REACHED for {symbol}: {profit_pct:.2f}% (Target: {target_profit}%, Bid: {best_bid}, Avg: {avg_price})")
                         # Mark as processing IMMEDIATELY to prevent double triggering
                         position['processing'] = True
 
@@ -339,15 +374,17 @@ class OptionProfitBooker:
                                     self.tracked_positions[symbol]['buy_avg'] = pos.get('buyavg') or pos.get('buy_avg')
                             else:
                                 # New position
+                                target = self.get_target_profit(symbol)
                                 self.tracked_positions[symbol] = {
                                     'symbol': symbol,
                                     'exchange': pos.get('exchange'),
                                     'product': pos.get('product'),
                                     'quantity': qty,
                                     'buy_avg': pos.get('buyavg') or pos.get('buy_avg'),
+                                    'target_profit': target,
                                     'processing': False
                                 }
-                                logger.info(f"New position detected: {symbol} (Qty: {qty})")
+                                logger.info(f"New position detected: {symbol} (Qty: {qty}, Target: {target}%)")
                                 self.sub_queue.put({
                                     'action': 'subscribe',
                                     'symbol': symbol,
