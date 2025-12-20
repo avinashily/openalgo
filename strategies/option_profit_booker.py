@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # ========================= CONFIGURATION =========================
 # Logging Setup
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 if os.getenv("DEBUG", "").lower() in ("true", "1", "yes"):
     LOG_LEVEL = "DEBUG"
 
@@ -43,7 +43,7 @@ HOST = os.getenv('HOST_SERVER', 'http://127.0.0.1:5000')
 WS_URL = os.getenv('WEBSOCKET_URL', 'ws://127.0.0.1:8765')
 POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 5)) # Faster polling (5s) for sync
 
-# Strategy Constants
+# Strategy Constants (Reference Script Values)
 NEAR_EXPIRY_DAYS = 30
 NEAR_TARGET_PCT = 10.0
 FAR_TARGET_PCT = 28.0
