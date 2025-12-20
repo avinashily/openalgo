@@ -5,6 +5,7 @@ Option Profit Booker Strategy (Async/Robust)
 - Handles edge cases: Partial fills, Re-entries (Avg Price change), Stale Orders.
 - Longs: Expiry-based Targets (10% Near / 28% Far).
 - Shorts: Margin-based Targets (0.65% Profit -> Lock 0.55% -> Trail).
+- Supports DEBUG mode for verbose logging.
 """
 import os
 import sys
@@ -15,13 +16,19 @@ import requests
 import websockets
 import re
 import pytz
+import functools
+import traceback
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 # ========================= CONFIGURATION =========================
-# Logging
+# Logging Setup
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+if os.getenv("DEBUG", "").lower() in ("true", "1", "yes"):
+    LOG_LEVEL = "DEBUG"
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(os.path.join("log", "option_profit_booker.log")),
@@ -36,7 +43,7 @@ HOST = os.getenv('HOST_SERVER', 'http://127.0.0.1:5000')
 WS_URL = os.getenv('WEBSOCKET_URL', 'ws://127.0.0.1:8765')
 POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 5)) # Faster polling (5s) for sync
 
-# Strategy Constants (Reference Script Values)
+# Strategy Constants
 NEAR_EXPIRY_DAYS = 30
 NEAR_TARGET_PCT = 10.0
 FAR_TARGET_PCT = 28.0
@@ -92,12 +99,22 @@ class ApiClient:
         try:
             url = f"{HOST}/api/v1/{endpoint}"
             if "apikey" not in payload: payload["apikey"] = API_KEY
+
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"API REQ {endpoint}: {json.dumps(payload)}")
+
             resp = requests.post(url, json=payload, headers=self.headers, timeout=5)
+
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"API RESP {endpoint} [{resp.status_code}]: {resp.text}")
+
             if resp.status_code == 200:
                 return resp.json()
             return None
         except Exception as e:
             logger.error(f"API Error {endpoint}: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(traceback.format_exc())
             return None
 
     def get_positions(self):
@@ -158,35 +175,29 @@ api = ApiClient()
 # ========================= CORE LOGIC =========================
 
 async def cancel_existing_exit_orders(symbol, current_active_oid=None):
-    """Cancel all OPEN orders for this symbol, except maybe the current active one if specified"""
-    # In this strategy, if we are calling this, we usually want to wipe slate clean
-    # or we are about to place a new one.
-    # We use the OPEN_ORDERS_CACHE for speed, but ideally verification is needed.
-
+    """Cancel all OPEN orders for this symbol"""
     async with ORDERS_LOCK:
         orders_to_cancel = []
         for oid, order in OPEN_ORDERS_CACHE.items():
             if order['symbol'] == symbol and order['status'] in ['OPEN', 'PENDING', 'TRIGGER_PENDING']:
                 if current_active_oid and oid == current_active_oid:
-                    continue # Don't cancel the one we are tracking as valid
+                    continue
                 orders_to_cancel.append(oid)
 
     if orders_to_cancel:
         logger.info(f"Cancelling existing orders for {symbol}: {orders_to_cancel}")
-        # Execute cancellations
         loop = asyncio.get_running_loop()
         futures = [loop.run_in_executor(API_EXECUTOR, api.cancel_order, oid) for oid in orders_to_cancel]
         await asyncio.gather(*futures)
 
 async def reconcile_position_state(pos):
-    """Sync API position with Internal State. Handle Qty/Avg changes."""
+    """Sync API position with Internal State"""
     symbol = pos['symbol']
     qty = int(safe_float(pos.get('netqty', 0) or pos.get('quantity', 0)))
     avg_price = safe_float(pos.get('buyavg') if qty > 0 else pos.get('sellavg'))
 
     async with STATE_LOCK:
         if symbol not in POSITIONS_STATE:
-            # Init State
             POSITIONS_STATE[symbol] = {
                 'symbol': symbol,
                 'exchange': pos.get('exchange'),
@@ -196,44 +207,38 @@ async def reconcile_position_state(pos):
                 'margin': 0.0,
                 'active_oid': None,
                 'last_trigger': None,
-                'lowest_ask': None, # For Trailing
-                'state': 'TRACKING' # TRACKING, PLACED
+                'lowest_ask': None,
+                'state': 'TRACKING'
             }
-            # Fetch Margin if Short
             if qty < 0:
                 loop = asyncio.get_running_loop()
-                margin = await loop.run_in_executor(API_EXECUTOR, api.fetch_margin_for_short,
-                                                  symbol, pos['exchange'], pos['product'], qty)
+                # Use partial if needed, but fetch_margin_for_short takes positional args in wrapper
+                call = functools.partial(api.fetch_margin_for_short, symbol, pos['exchange'], pos['product'], qty)
+                margin = await loop.run_in_executor(API_EXECUTOR, call)
                 POSITIONS_STATE[symbol]['margin'] = margin
                 logger.info(f"New Short {symbol}: Margin {margin}")
 
         else:
-            # Reconcile
             state = POSITIONS_STATE[symbol]
-
-            # Check for significant changes (Partial fill, Averaging)
             qty_changed = state['qty'] != qty
-            avg_changed = abs(state['avg_price'] - avg_price) > 0.05 # Tolerance
+            avg_changed = abs(state['avg_price'] - avg_price) > 0.05
 
             if qty_changed or avg_changed:
                 logger.warning(f"Position Changed {symbol}: Qty {state['qty']}->{qty}, Avg {state['avg_price']}->{avg_price}")
 
-                # CANCEL active order if any
                 if state['active_oid']:
-                    await cancel_existing_exit_orders(symbol) # Cancel all to be safe
+                    await cancel_existing_exit_orders(symbol)
 
-                # Update State
                 state['qty'] = qty
                 state['avg_price'] = avg_price
                 state['active_oid'] = None
                 state['last_trigger'] = None
                 state['state'] = 'TRACKING'
 
-                # Re-fetch Margin for Short if Qty changed
                 if qty < 0:
                      loop = asyncio.get_running_loop()
-                     margin = await loop.run_in_executor(API_EXECUTOR, api.fetch_margin_for_short,
-                                                       symbol, pos['exchange'], pos['product'], qty)
+                     call = functools.partial(api.fetch_margin_for_short, symbol, pos['exchange'], pos['product'], qty)
+                     margin = await loop.run_in_executor(API_EXECUTOR, call)
                      state['margin'] = margin
 
 async def strategy_engine():
@@ -241,7 +246,6 @@ async def strategy_engine():
     logger.info("Strategy Engine Started")
     while True:
         try:
-            # Snapshot of keys to iterate
             async with STATE_LOCK:
                 symbols = list(POSITIONS_STATE.keys())
 
@@ -250,24 +254,22 @@ async def strategy_engine():
                     if symbol not in POSITIONS_STATE: continue
                     state = POSITIONS_STATE[symbol]
 
-                # Get Depth
                 async with DEPTH_LOCK:
                     depth = DEPTH_CACHE.get(symbol)
 
                 if not depth: continue
 
-                # LONG Logic
                 if state['qty'] > 0:
                     await handle_long(state, depth)
-
-                # SHORT Logic
                 elif state['qty'] < 0:
                     await handle_short(state, depth)
 
         except Exception as e:
             logger.error(f"Strategy Engine Error: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(traceback.format_exc())
 
-        await asyncio.sleep(1) # Run every 1s
+        await asyncio.sleep(1)
 
 async def handle_long(state, depth):
     bid = depth.get('bid', 0)
@@ -275,34 +277,33 @@ async def handle_long(state, depth):
 
     symbol = state['symbol']
     avg = state['avg_price']
+
+    if avg <= 0: return
+
     qty = state['qty']
 
-    # Calculate Target
     days = get_days_to_expiry(symbol)
     target_pct = NEAR_TARGET_PCT if days <= NEAR_EXPIRY_DAYS else FAR_TARGET_PCT
     target_price = avg * (1 + target_pct / 100.0)
 
-    # Special Condition (Qty > 300 & Time > 15:00 IST)
     now_ist = datetime.now(IST)
     if qty > SPECIAL_QTY_THRESHOLD and now_ist.hour >= 15:
         target_pts = avg + SPECIAL_POINTS_CAP
         target_price = min(target_price, target_pts)
 
-    # Check Trigger
     if bid >= target_price:
-        # Check if already working
-        if state['state'] == 'PLACED':
-            return # Assume order is there
+        if state['state'] == 'PLACED': return
 
         logger.info(f"LONG TARGET {symbol}: Bid {bid} >= Target {target_price}")
 
-        # Place Exit
         await cancel_existing_exit_orders(symbol)
 
         loop = asyncio.get_running_loop()
-        resp = await loop.run_in_executor(API_EXECUTOR, api.place_order,
+        call = functools.partial(api.place_order,
             symbol=symbol, exchange=state['exchange'], action="SELL",
             quantity=qty, product=state['product'], price_type="LIMIT", price=bid)
+
+        resp = await loop.run_in_executor(API_EXECUTOR, call)
 
         if resp and resp.get('status') == 'success':
             async with STATE_LOCK:
@@ -315,34 +316,35 @@ async def handle_short(state, depth):
 
     symbol = state['symbol']
     avg = state['avg_price']
-    qty = abs(state['qty']) # Positive for calc
+
+    if avg <= 0: return
+
+    qty = abs(state['qty'])
     margin = state['margin']
 
-    if margin <= 0: return # Waiting for margin fetch
+    if margin <= 0: return
 
-    # PnL = (Entry - Current) * Qty
     profit = (avg - ask) * qty
     target_amt = margin * (SHORT_TARGET_MARGIN_PCT / 100.0)
 
-    # Trigger Logic
     if profit >= target_amt:
-        # If not tracking, Place Initial SL
         if state['state'] == 'TRACKING':
             logger.info(f"SHORT TARGET {symbol}: Profit {profit} >= {target_amt}")
 
-            # Lock Calc
             lock_amt = margin * (SHORT_LOCK_MARGIN_PCT / 100.0)
             lock_dist = lock_amt / qty
             trigger_price = avg - lock_dist
 
-            # Place Order
             await cancel_existing_exit_orders(symbol)
             loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(API_EXECUTOR, api.place_order,
+
+            call = functools.partial(api.place_order,
                 symbol=symbol, exchange=state['exchange'], action="BUY",
                 quantity=qty, product=state['product'], price_type="SL-M",
                 trigger_price=round(trigger_price, 1),
                 tag="OPB", trailing_sl=TRAILING_POINT)
+
+            resp = await loop.run_in_executor(API_EXECUTOR, call)
 
             if resp and resp.get('status') == 'success':
                 async with STATE_LOCK:
@@ -351,31 +353,25 @@ async def handle_short(state, depth):
                     state['last_trigger'] = trigger_price
                     state['lowest_ask'] = ask
 
-        # If already Trailing, Update Logic
         elif state['state'] == 'TRAILING':
-            # Check order status first
-            # (In a real high-freq system, we rely on websocket order updates,
-            # here we might rely on the Poller to kill state if order is gone,
-            # but for safety, we assume it's live if Poller hasn't killed it yet)
 
             lowest = state.get('lowest_ask', avg)
             current_trigger = state['last_trigger']
 
-            # Update Lowest
             if ask < lowest:
                 diff = lowest - ask
                 if diff >= TRAILING_POINT:
-                    # Move SL DOWN by diff
                     new_trigger = current_trigger - diff
 
-                    # Execute Modify
                     logger.info(f"Trailing {symbol}: Ask {ask} (Low {lowest}) -> New Trig {new_trigger}")
 
                     loop = asyncio.get_running_loop()
-                    resp = await loop.run_in_executor(API_EXECUTOR, api.modify_order,
+                    call = functools.partial(api.modify_order,
                         orderid=state['active_oid'],
                         trigger_price=round(new_trigger, 1),
                         price_type="SL-M", symbol=symbol, exchange="NFO")
+
+                    resp = await loop.run_in_executor(API_EXECUTOR, call)
 
                     if resp and resp.get('status') == 'success':
                         async with STATE_LOCK:
@@ -390,14 +386,12 @@ async def data_poller():
 
     while True:
         try:
-            # 1. Fetch Orders
             orders = await loop.run_in_executor(API_EXECUTOR, api.get_orders)
             async with ORDERS_LOCK:
                 OPEN_ORDERS_CACHE.clear()
                 for o in orders:
                     OPEN_ORDERS_CACHE[o.get('orderid')] = o
 
-            # 2. Fetch Positions
             positions = await loop.run_in_executor(API_EXECUTOR, api.get_positions)
 
             active_symbols = set()
@@ -409,20 +403,19 @@ async def data_poller():
                     active_symbols.add(sym)
                     await reconcile_position_state(pos)
 
-            # 3. Cleanup Closed
             async with STATE_LOCK:
                 tracked = list(POSITIONS_STATE.keys())
                 for sym in tracked:
                     if sym not in active_symbols:
-                        # Position closed/flat
                         logger.info(f"Position Closed: {sym}")
-                        # Cancel any lingering exit orders we tracked
                         if POSITIONS_STATE[sym]['active_oid']:
                             await cancel_existing_exit_orders(sym, None)
                         del POSITIONS_STATE[sym]
 
         except Exception as e:
             logger.error(f"Poller Error: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(traceback.format_exc())
 
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -433,14 +426,15 @@ async def websocket_listener():
     while True:
         try:
             async with websockets.connect(WS_URL) as ws:
-                # Auth
                 await ws.send(json.dumps({"action": "authenticate", "api_key": API_KEY}))
 
-                # Subscribe Loop (Check needed subscriptions)
                 sub_task = asyncio.create_task(manage_subscriptions(ws))
 
                 while True:
                     msg = await ws.recv()
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"WS IN: {msg[:200]}...") # Truncate large msgs
+
                     data = json.loads(msg)
 
                     if data.get('type') == 'market_data' and data.get('mode') == 3:
@@ -459,6 +453,8 @@ async def websocket_listener():
 
         except Exception as e:
             logger.error(f"WS Error: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(traceback.format_exc())
             await asyncio.sleep(5)
 
 async def manage_subscriptions(ws):
@@ -469,24 +465,18 @@ async def manage_subscriptions(ws):
             async with STATE_LOCK:
                 current_syms = set(POSITIONS_STATE.keys())
 
-            # Subscribe New
             to_sub = current_syms - subscribed
             for sym in to_sub:
-                # Need exchange... retrieve from state
                 async with STATE_LOCK:
                     exc = POSITIONS_STATE[sym]['exchange']
 
                 msg = {"action": "subscribe", "symbol": sym, "exchange": exc, "mode": 3}
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"WS OUT: {json.dumps(msg)}")
+
                 await ws.send(json.dumps(msg))
                 subscribed.add(sym)
                 logger.info(f"Subscribed {sym}")
-
-            # Unsubscribe Old
-            to_unsub = subscribed - current_syms
-            for sym in to_unsub:
-                # We might not know exchange anymore if deleted from state...
-                # Ideally we track it. For now, skip strict unsub to avoid complexity or use 'NFO' default.
-                pass
 
         except Exception as e:
             logger.error(f"Sub Manager Error: {e}")
@@ -502,7 +492,6 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Create Tasks
     loop.create_task(websocket_listener())
     loop.create_task(data_poller())
     loop.create_task(strategy_engine())
