@@ -26,6 +26,7 @@ class TestSDKStrategy(unittest.TestCase):
         strategy.client.modifyorder = MagicMock(return_value={'status': 'success'})
         strategy.client.cancelorder = MagicMock(return_value={'status': 'success'})
         strategy.client.get_orderbook = MagicMock(return_value={'status': 'success', 'data': []})
+        strategy.client.orderstatus = MagicMock(return_value={'status': 'success', 'data': {'order_status': 'OPEN'}})
 
     def test_long_trigger(self):
         """Test Long Position Target Trigger via Callback"""
@@ -80,6 +81,33 @@ class TestSDKStrategy(unittest.TestCase):
         _, kwargs = strategy.client.modifyorder.call_args
         # Old Trig 89.0 -> New 88.5
         self.assertEqual(kwargs['trigger_price'], 88.5)
+
+    def test_dead_order_reset(self):
+        """Test race condition: Order died externally, trailing logic should reset state"""
+        symbol = "TEST_PE"
+        strategy.POSITIONS_STATE[symbol] = {
+            "symbol": symbol, "qty": -50, "avg_price": 100.0,
+            "exchange": "NFO", "product": "MIS", "state": "TRAILING",
+            "margin": 100000.0, "active_oid": "DEAD_OID",
+            "last_trigger": 89.0, "lowest_ask": 80.0
+        }
+
+        # Mock status as COMPLETE (Dead)
+        strategy.client.orderstatus.return_value = {'status': 'success', 'data': {'order_status': 'COMPLETE'}}
+
+        # Trigger trail update (Ask 79.5 < 80.0)
+        msg = {"data": {"symbol": symbol, "depth": {"buy": [], "sell": [{"price": 79.5}]}}}
+        strategy.on_market_data(msg)
+
+        # Should verify status
+        strategy.client.orderstatus.assert_called_with(orderid="DEAD_OID")
+
+        # Should NOT modify
+        strategy.client.modifyorder.assert_not_called()
+
+        # Should Reset State
+        self.assertEqual(strategy.POSITIONS_STATE[symbol]['state'], 'TRACKING')
+        self.assertIsNone(strategy.POSITIONS_STATE[symbol]['active_oid'])
 
 if __name__ == '__main__':
     unittest.main()

@@ -38,6 +38,7 @@ except ImportError:
         def placeorder(self, *args, **kwargs): pass
         def modifyorder(self, *args, **kwargs): pass
         def cancelorder(self, *args, **kwargs): pass
+        def orderstatus(self, *args, **kwargs): return {"status": "success", "data": {"order_status": "open"}}
         def get_positions(self): return {"status": "success", "data": []}
         def get_orderbook(self): return {"status": "success", "data": []}
 
@@ -136,6 +137,20 @@ def fetch_margin_for_short(symbol, exchange, product, quantity):
     except Exception as e:
         logger.error(f"Margin Fetch Error {symbol}: {e}")
     return 0.0
+
+def is_order_active(orderid):
+    """Check if order is OPEN or PENDING"""
+    if not orderid: return False
+    try:
+        resp = client.orderstatus(orderid=orderid)
+        if resp and resp.get("status") == "success":
+            # API might return data dict or direct fields
+            data = resp.get("data", resp)
+            status = data.get("order_status", "").upper()
+            return status in ["OPEN", "PENDING", "TRIGGER_PENDING", "TRIGGER PENDING"]
+    except Exception as e:
+        logger.error(f"Order Status Error {orderid}: {e}")
+    return False
 
 def cancel_existing_exit_orders(symbol, exclude_oid=None):
     """Cancel open orders for symbol"""
@@ -299,6 +314,15 @@ def process_short(state, ask):
             if ask < lowest:
                 diff = lowest - ask
                 if diff >= TRAILING_POINT:
+
+                    # Verify Order is Alive (Point 2)
+                    if not is_order_active(state["active_oid"]):
+                        logger.warning(f"Trailing Order {state['active_oid']} not active. Resetting to TRACKING.")
+                        with STATE_LOCK:
+                            state["state"] = "TRACKING"
+                            state["active_oid"] = None
+                        return
+
                     new_trigger = current_trigger - diff
 
                     logger.info(f"Trailing {symbol}: Ask {ask} (Low {lowest}) -> New Trig {new_trigger}")
@@ -334,7 +358,7 @@ def sync_positions():
 
                 for pos in positions:
                     sym = pos.get("symbol")
-                    qty = int(safe_float(pos.get("netqty", 0) or pos.get("quantity", 0)))
+                    qty = int(safe_float(pos.get("netqty", 0) or pos.get("quantity', 0")))
 
                     if qty != 0:
                         active_symbols.add(sym)
