@@ -14,7 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Mock Env
 os.environ['OPENALGO_APIKEY'] = 'test_key'
 
-import strategies.option_profit_booker as strategy
+import strategies.derivatives_profit_booker as strategy
 
 class TestAsyncOptionStrategy(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -82,7 +82,6 @@ class TestAsyncOptionStrategy(unittest.IsolatedAsyncioTestCase):
             await strategy.handle_short(strategy.POSITIONS_STATE[symbol], depth_yes)
 
             strategy.api.place_order.assert_called()
-            # We can verify args if needed, but existence checks flow
 
     async def test_trailing_update(self):
         """Test Trailing Update Logic"""
@@ -148,7 +147,6 @@ class TestAsyncOptionStrategy(unittest.IsolatedAsyncioTestCase):
         with patch('asyncio.get_running_loop') as mock_loop:
             mock_loop.return_value.run_in_executor = AsyncMock(side_effect=self.mock_run_in_executor)
 
-            # Need to call handle_future. Currently strategy.handle_future exists.
             await strategy.handle_future(strategy.POSITIONS_STATE[symbol], depth)
 
             # Verify Cancel

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Option Profit Booker Strategy (Async/Robust)
+Derivatives Profit Booker Strategy (Async/Robust)
 - Asyncio-based architecture with concurrent Polling, WebSocket, and Strategy Engine.
 - Handles edge cases: Partial fills, Re-entries (Avg Price change), Stale Orders.
 - Longs (Options): Expiry-based Targets (3% Near / 50% Far).
@@ -32,11 +32,11 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join("log", "option_profit_booker.log")),
+        logging.FileHandler(os.path.join("log", "derivatives_profit_booker.log")),
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("OptionProfitBooker")
+logger = logging.getLogger("DerivativesProfitBooker")
 
 # Env Vars
 API_KEY = os.getenv('OPENALGO_APIKEY')
@@ -145,7 +145,7 @@ class ApiClient:
 
     def place_order(self, **kwargs):
         payload = {
-            "strategy": "OptionProfitBooker",
+            "strategy": "DerivativesProfitBooker",
             "disclosed_quantity": 0,
             "price": 0,
             "trigger_price": 0
