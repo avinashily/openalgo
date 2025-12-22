@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch, AsyncMock, call
 import os
 import sys
 import json
@@ -45,7 +45,6 @@ class TestAsyncOptionStrategy(unittest.IsolatedAsyncioTestCase):
         }
 
         with patch('asyncio.get_running_loop') as mock_loop:
-            # Enforce positional only
             mock_loop.return_value.run_in_executor = AsyncMock(side_effect=self.mock_run_in_executor)
 
             await strategy.reconcile_position_state(pos)
@@ -107,6 +106,32 @@ class TestAsyncOptionStrategy(unittest.IsolatedAsyncioTestCase):
             strategy.api.modify_order.assert_called_once()
             _, kwargs = strategy.api.modify_order.call_args
             self.assertEqual(kwargs['trigger_price'], 88.5)
+
+    async def test_subscription_management(self):
+        """Test Subscribe/Unsubscribe logic"""
+        mock_ws = AsyncMock()
+        subscribed = {}
+
+        # 1. New Position -> Subscribe
+        strategy.POSITIONS_STATE['NEW_SYM'] = {'exchange': 'NFO'}
+
+        await strategy._sync_subscriptions_step(mock_ws, subscribed)
+
+        expected_sub = {"action": "subscribe", "symbol": "NEW_SYM", "exchange": "NFO", "mode": 3}
+        mock_ws.send.assert_called_with(json.dumps(expected_sub))
+        self.assertIn("NEW_SYM", subscribed)
+        self.assertEqual(subscribed["NEW_SYM"], "NFO")
+
+        mock_ws.send.reset_mock()
+
+        # 2. Position Closed -> Unsubscribe
+        del strategy.POSITIONS_STATE['NEW_SYM']
+
+        await strategy._sync_subscriptions_step(mock_ws, subscribed)
+
+        expected_unsub = {"action": "unsubscribe", "symbol": "NEW_SYM", "exchange": "NFO", "mode": 3}
+        mock_ws.send.assert_called_with(json.dumps(expected_unsub))
+        self.assertNotIn("NEW_SYM", subscribed)
 
 if __name__ == '__main__':
     unittest.main()

@@ -369,7 +369,7 @@ async def handle_short(state, depth):
                     call = functools.partial(api.modify_order,
                         orderid=state['active_oid'],
                         trigger_price=round(new_trigger, 1),
-                        price_type="SL-M", symbol=symbol, exchange="NFO")
+                        price_type="SL-M", symbol=symbol, exchange=state['exchange'])
 
                     resp = await loop.run_in_executor(API_EXECUTOR, call)
 
@@ -457,27 +457,41 @@ async def websocket_listener():
                 logger.debug(traceback.format_exc())
             await asyncio.sleep(5)
 
+async def _sync_subscriptions_step(ws, subscribed):
+    """Sync subscribed list with POSITIONS_STATE"""
+    async with STATE_LOCK:
+        current_map = {sym: data['exchange'] for sym, data in POSITIONS_STATE.items()}
+
+    # Subscribe New
+    to_sub = set(current_map.keys()) - set(subscribed.keys())
+    for sym in to_sub:
+        exc = current_map[sym]
+        msg = {"action": "subscribe", "symbol": sym, "exchange": exc, "mode": 3}
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"WS OUT: {json.dumps(msg)}")
+
+        await ws.send(json.dumps(msg))
+        subscribed[sym] = exc
+        logger.info(f"Subscribed {sym}")
+
+    # Unsubscribe Old
+    to_unsub = set(subscribed.keys()) - set(current_map.keys())
+    for sym in to_unsub:
+        exc = subscribed[sym]
+        msg = {"action": "unsubscribe", "symbol": sym, "exchange": exc, "mode": 3}
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"WS OUT: {json.dumps(msg)}")
+
+        await ws.send(json.dumps(msg))
+        del subscribed[sym]
+        logger.info(f"Unsubscribed {sym}")
+
 async def manage_subscriptions(ws):
     """Periodically subscribe to new symbols in State"""
-    subscribed = set()
+    subscribed = {} # {symbol: exchange}
     while True:
         try:
-            async with STATE_LOCK:
-                current_syms = set(POSITIONS_STATE.keys())
-
-            to_sub = current_syms - subscribed
-            for sym in to_sub:
-                async with STATE_LOCK:
-                    exc = POSITIONS_STATE[sym]['exchange']
-
-                msg = {"action": "subscribe", "symbol": sym, "exchange": exc, "mode": 3}
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"WS OUT: {json.dumps(msg)}")
-
-                await ws.send(json.dumps(msg))
-                subscribed.add(sym)
-                logger.info(f"Subscribed {sym}")
-
+            await _sync_subscriptions_step(ws, subscribed)
         except Exception as e:
             logger.error(f"Sub Manager Error: {e}")
 
