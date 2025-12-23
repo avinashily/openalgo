@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """
 Derivatives Profit Booker Strategy (OpenAlgo SDK | Robust)
-- Uses OpenAlgo SDK `api` for all interactions (No raw websockets).
-- Callback-driven (`on_market_data`) execution for zero latency.
+- Uses OpenAlgo SDK `api` for all interactions.
+- Callback-driven (`on_market_data`) execution.
+- Fully Synchronous implementation (SDK-compliant).
 - Handles edge cases:
   - Race conditions (Zombie orders).
   - Manual intervention (Qty/Avg changes -> Reset).
@@ -37,6 +38,8 @@ except ImportError:
         def get_orderbook(self): return {"status": "success", "data": []}
 
 # ========================= CONFIGURATION =========================
+STRATEGY_NAME = "DerivativesProfitBooker"
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 if os.getenv("DEBUG", "").lower() in ("true", "1", "yes"):
@@ -50,7 +53,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("DerivativesProfitBooker")
+logger = logging.getLogger(STRATEGY_NAME)
 
 # Env Vars
 API_KEY = os.getenv('OPENALGO_APIKEY')
@@ -116,7 +119,7 @@ def fetch_margin(symbol, exchange, product, quantity, action):
     """Fetch utilized margin via analyze mode"""
     try:
         resp = client.placeorder(
-            strategy="DerivativesProfitBooker",
+            strategy=STRATEGY_NAME,
             mode="analyze",
             symbol=symbol,
             action=action,
@@ -153,7 +156,7 @@ def is_order_active(orderid):
     return False
 
 def cancel_existing_exit_orders(symbol, exclude_oid=None):
-    """Cancel open orders for symbol"""
+    """Cancel open orders for symbol (Synchronous)"""
     try:
         ob = client.get_orderbook()
         orders = ob.get("data", [])
@@ -212,9 +215,6 @@ def on_market_data(message):
             logger.debug(traceback.format_exc())
 
 def process_future(state, bid, ask):
-    # Only validate price for the direction we need
-    # bid/ask <= 0 checks moved inside logic blocks
-
     qty = state["qty"]
     margin = state["margin"]
     avg = state["avg_price"]
@@ -248,7 +248,7 @@ def process_future(state, bid, ask):
         cancel_existing_exit_orders(symbol)
 
         resp = client.placeorder(
-            strategy="DerivativesProfitBooker",
+            strategy=STRATEGY_NAME,
             symbol=symbol,
             exchange=state["exchange"],
             action=exit_action,
@@ -295,7 +295,7 @@ def process_long(state, bid):
 
         cancel_existing_exit_orders(symbol)
         resp = client.placeorder(
-            strategy="DerivativesProfitBooker",
+            strategy=STRATEGY_NAME,
             symbol=symbol,
             exchange=state["exchange"],
             action="SELL",
@@ -340,7 +340,7 @@ def process_short(state, ask):
 
             cancel_existing_exit_orders(symbol)
             resp = client.placeorder(
-                strategy="DerivativesProfitBooker",
+                strategy=STRATEGY_NAME,
                 symbol=symbol,
                 exchange=state["exchange"],
                 action="BUY",
@@ -417,56 +417,9 @@ def sync_positions():
 
                     if qty != 0:
                         active_symbols.add(sym)
+                        reconcile_position_state(pos)
 
-                        # Reconcile State
-                        with STATE_LOCK:
-                            if sym not in POSITIONS_STATE:
-                                # New Position
-                                logger.info(f"New Position Detected: {sym}")
-                                is_fut = is_future_symbol(sym)
-
-                                POSITIONS_STATE[sym] = {
-                                    "symbol": sym,
-                                    "qty": qty,
-                                    "avg_price": safe_float(pos.get("buyavg") if qty > 0 else pos.get("sellavg")),
-                                    "exchange": pos.get("exchange"),
-                                    "product": pos.get("product"),
-                                    "margin": 0.0,
-                                    "state": "TRACKING",
-                                    "active_oid": None,
-                                    "last_trigger": None,
-                                    "is_future": is_fut
-                                }
-                                # Fetch Margin for Short OR Future
-                                if qty < 0 or is_fut:
-                                    action = "BUY" if qty > 0 else "SELL"
-                                    m = fetch_margin(sym, pos.get("exchange"), pos.get("product"), qty, action)
-                                    POSITIONS_STATE[sym]["margin"] = m
-                                    logger.info(f"Margin fetched for {sym}: {m}")
-
-                                to_subscribe.append({"exchange": pos.get("exchange"), "symbol": sym})
-
-                            else:
-                                # Check for partial fills / changes
-                                state = POSITIONS_STATE[sym]
-                                curr_avg = safe_float(pos.get("buyavg") if qty > 0 else pos.get("sellavg"))
-                                if state["qty"] != qty or abs(state["avg_price"] - curr_avg) > 0.05:
-                                    logger.warning(f"Position Changed {sym}: Resetting State")
-                                    # Reset
-                                    if state["active_oid"]:
-                                        cancel_existing_exit_orders(sym)
-
-                                    state["qty"] = qty
-                                    state["avg_price"] = curr_avg
-                                    state["state"] = "TRACKING"
-                                    state["active_oid"] = None
-
-                                    if qty < 0 or state.get("is_future"):
-                                        action = "BUY" if qty > 0 else "SELL"
-                                        m = fetch_margin(sym, pos.get("exchange"), pos.get("product"), qty, action)
-                                        state["margin"] = m
-
-                # Handle Subscriptions
+            # Handle Subscriptions
                 if to_subscribe:
                     logger.info(f"Subscribing to: {to_subscribe}")
                     client.subscribe_quote(to_subscribe, on_data_received=on_market_data)
@@ -492,6 +445,61 @@ def sync_positions():
                 logger.debug(traceback.format_exc())
 
         time.sleep(POLL_INTERVAL)
+
+def reconcile_position_state(pos):
+    """Sync API position with Internal State"""
+    symbol = pos['symbol']
+    qty = int(safe_float(pos.get('netqty', 0) or pos.get('quantity', 0)))
+    avg_price = safe_float(pos.get('buyavg') if qty > 0 else pos.get('sellavg'))
+    exchange = pos.get('exchange')
+    product = pos.get('product')
+
+    with STATE_LOCK:
+        if symbol not in POSITIONS_STATE:
+            is_fut = is_future_symbol(symbol)
+            state = {
+                'symbol': symbol,
+                'exchange': exchange,
+                'product': product,
+                'qty': qty,
+                'avg_price': avg_price,
+                'margin': 0.0,
+                'active_oid': None,
+                'last_trigger': None,
+                'lowest_ask': None,
+                'state': 'TRACKING',
+                'is_future': is_fut
+            }
+
+            if qty < 0 or is_fut:
+                action = "BUY" if qty > 0 else "SELL"
+                m = fetch_margin(symbol, exchange, product, qty, action)
+                state['margin'] = m
+                logger.info(f"New Position {symbol} (Fut={is_fut}): Margin {m}")
+
+            POSITIONS_STATE[symbol] = state
+
+        else:
+            state = POSITIONS_STATE[symbol]
+            qty_changed = state['qty'] != qty
+            avg_changed = abs(state['avg_price'] - avg_price) > 0.05
+
+            if qty_changed or avg_changed:
+                logger.warning(f"Position Changed {symbol}: Qty {state['qty']}->{qty}, Avg {state['avg_price']}->{avg_price}")
+
+                if state['active_oid']:
+                    cancel_existing_exit_orders(symbol)
+
+                state['qty'] = qty
+                state['avg_price'] = avg_price
+                state['active_oid'] = None
+                state['last_trigger'] = None
+                state['state'] = 'TRACKING'
+
+                if qty < 0 or state.get('is_future'):
+                     action = "BUY" if qty > 0 else "SELL"
+                     m = fetch_margin(symbol, exchange, product, qty, action)
+                     state['margin'] = m
 
 # ========================= MAIN =========================
 def main():
