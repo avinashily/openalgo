@@ -396,48 +396,44 @@ def sync_positions():
     logger.info("Sync Loop Started")
     while True:
         try:
-            resp = client.openposition(strategy=STRATEGY_NAME)
-            if resp and resp.get("status") == "success":
-                data = resp.get("data")
-                if isinstance(data, dict):
-                    positions = [data]
-                elif isinstance(data, list):
-                    positions = data
-                else:
-                    positions = []
+            with STATE_LOCK:
+                symbols = list(POSITIONS_STATE.keys())
 
-                active_symbols = set()
-                to_subscribe = []
+            # v1.0.0.40 Requirement: Iterate known symbols
+            for sym in symbols:
+                with STATE_LOCK:
+                    if sym not in POSITIONS_STATE: continue
+                    s = POSITIONS_STATE[sym]
+                    exc = s.get('exchange')
+                    prod = s.get('product')
 
-                for pos in positions:
-                    sym = pos.get("symbol")
-                    if not sym: continue # Basic safety
+                if not (exc and prod): continue
 
-                    qty = int(safe_float(pos.get("netqty", 0) or pos.get("quantity', 0")))
+                resp = client.openposition(
+                    strategy=STRATEGY_NAME,
+                    symbol=sym,
+                    exchange=exc,
+                    product=prod
+                )
 
-                    if qty != 0:
-                        active_symbols.add(sym)
+                # Wrap single dict in list
+                if resp and resp.get("status") == "success":
+                    data = resp.get("data")
+                    if isinstance(data, dict):
+                        positions = [data]
+                    elif isinstance(data, list):
+                        positions = data # Should not happen per rules but handling
+                    else:
+                        positions = []
+
+                    for pos in positions:
                         reconcile_position_state(pos)
+                else:
+                    # Handle case where position is gone
+                    pass
 
             # Handle Subscriptions
-                if to_subscribe:
-                    logger.info(f"Subscribing to: {to_subscribe}")
-                    client.subscribe_quote(to_subscribe, on_data_received=on_market_data)
-                    for item in to_subscribe:
-                        SUBSCRIBED_SYMBOLS.add(item["symbol"])
-
-                # Handle Cleanup
-                with STATE_LOCK:
-                    tracked = list(POSITIONS_STATE.keys())
-                    for sym in tracked:
-                        if sym not in active_symbols:
-                            logger.info(f"Position Closed: {sym}")
-                            exc = POSITIONS_STATE[sym]["exchange"]
-                            del POSITIONS_STATE[sym]
-                            # Unsubscribe
-                            client.unsubscribe_quote([{"exchange": exc, "symbol": sym}])
-                            if sym in SUBSCRIBED_SYMBOLS:
-                                SUBSCRIBED_SYMBOLS.remove(sym)
+            # Logic here is restricted by lack of discovery.
 
         except Exception as e:
             logger.error(f"Sync Error: {e}")
