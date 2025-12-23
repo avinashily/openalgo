@@ -33,6 +33,21 @@ class TestSDKStrategy(unittest.TestCase):
         # Mock openposition for sync logic tests if any
         strategy.client.openposition = MagicMock(return_value={'status': 'success', 'data': []})
 
+    @patch('strategies.derivatives_profit_booker.requests.get')
+    def test_fetch_position_book_rest(self, mock_get):
+        """Test REST Position Fetch"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "status": "success",
+            "data": [{"symbol": "TEST", "netqty": 50}]
+        }
+        mock_get.return_value = mock_response
+
+        positions = strategy.fetch_position_book_rest()
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]['symbol'], "TEST")
+
     def test_reconcile_new_short(self):
         """Test reconciling a new short position fetches margin (Sync)"""
         pos = {
@@ -51,9 +66,21 @@ class TestSDKStrategy(unittest.TestCase):
         self.assertEqual(state['margin'], 100000.0)
         strategy.client.placeorder.assert_called()
 
-    def test_long_trigger(self):
+    @patch('strategies.derivatives_profit_booker.requests.get')
+    def test_long_trigger(self, mock_get):
         """Test Long Position Target Trigger via Callback"""
         symbol = "TEST_CE"
+
+        # Mock Orderbook for REST call
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "status": "success",
+            "data": [
+                {"symbol": symbol, "orderid": "EXIT_OID", "order_status": "OPEN"}
+            ]
+        }
+        mock_get.return_value = mock_response
 
         strategy.POSITIONS_STATE[symbol] = {
             "symbol": symbol, "qty": 100, "avg_price": 100.0,
@@ -67,11 +94,19 @@ class TestSDKStrategy(unittest.TestCase):
         strategy.on_market_data(msg_high)
 
         strategy.client.placeorder.assert_called()
-        # Verify cancelallorder called
-        strategy.client.cancelallorder.assert_called_with(strategy=strategy.STRATEGY_NAME, symbol=symbol)
 
-    def test_short_trigger_and_trail(self):
+        # Verify REST-based cancel logic
+        strategy.client.cancelorder.assert_called_with(orderid="EXIT_OID", strategy=strategy.STRATEGY_NAME)
+
+    @patch('strategies.derivatives_profit_booker.requests.get')
+    def test_short_trigger_and_trail(self, mock_get):
         """Test Short Logic: Trigger -> SL Placement -> Trailing"""
+        # Mock Orderbook (Empty)
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"status": "success", "data": []}
+        mock_get.return_value = mock_response
+
         symbol = "TEST_PE"
         strategy.POSITIONS_STATE[symbol] = {
             "symbol": symbol, "qty": -50, "avg_price": 100.0,
@@ -126,26 +161,37 @@ class TestSDKStrategy(unittest.TestCase):
         self.assertEqual(strategy.POSITIONS_STATE[symbol]['state'], 'TRACKING')
         self.assertIsNone(strategy.POSITIONS_STATE[symbol]['active_oid'])
 
-    def test_future_cancels_manual_order(self):
+    @patch('strategies.derivatives_profit_booker.requests.get')
+    def test_future_cancels_manual_order(self, mock_get):
         """Test Future logic cancels manual/strategy orders"""
         symbol = "TEST26FEB24FUT"
+
+        # Mock Orderbook with a Manual Order (no strategy tag needed to find it via REST)
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "status": "success",
+            "data": [
+                {"symbol": symbol, "orderid": "MANUAL_OID", "order_status": "OPEN"}
+            ]
+        }
+        mock_get.return_value = mock_response
+
         strategy.POSITIONS_STATE[symbol] = {
             'symbol': symbol, 'exchange': 'NFO', 'product': 'MIS',
             'qty': 100, 'avg_price': 100.0, 'margin': 100000.0,
             'active_oid': None, 'state': 'TRACKING', 'is_future': True
         }
 
-        # Future Target 3% of Margin 100k = 3000.
-        # But NEAR_TARGET_PCT changed to 4.0% in recent update.
-        # Target = 4000.
-        # Profit = (141 - 100) * 100 = 4100. Trigger!
+        # Future Target 10% of Margin 100k = 10,000.
+        # Price 250 -> Profit (250 - 100) * 100 = 15,000 > 10,000.
 
-        msg = {"data": {"symbol": symbol, "depth": {"buy": [{"price": 141.0}], "sell": []}}}
+        msg = {"data": {"symbol": symbol, "depth": {"buy": [{"price": 250.0}], "sell": []}}}
 
         strategy.on_market_data(msg)
 
-        # Assert CancelALL called
-        strategy.client.cancelallorder.assert_called_with(strategy=strategy.STRATEGY_NAME, symbol=symbol)
+        # Assert Cancel called for specific OID (REST Logic)
+        strategy.client.cancelorder.assert_called_with(orderid="MANUAL_OID", strategy=strategy.STRATEGY_NAME)
 
         # Assert Place called
         strategy.client.placeorder.assert_called()

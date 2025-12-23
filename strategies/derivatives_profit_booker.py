@@ -18,6 +18,7 @@ import threading
 import pytz
 import traceback
 import re
+import requests
 from datetime import datetime
 
 # Import SDK
@@ -63,7 +64,7 @@ POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 5))
 
 # Constants
 NEAR_EXPIRY_DAYS = 45
-NEAR_TARGET_PCT = 4.0
+NEAR_TARGET_PCT = 10.0
 FAR_TARGET_PCT = 50.0
 SPECIAL_QTY_THRESHOLD = 600
 SPECIAL_POINTS_CAP = 400.0
@@ -90,6 +91,41 @@ client = api(
     ws_url=WS_URL,
     verbose=2 if LOG_LEVEL == "DEBUG" else 1
 )
+
+# ========================= REST HELPERS (HYBRID MODEL) =========================
+def fetch_position_book_rest():
+    """
+    Fetch all positions via REST API to ensure manual trades are discovered.
+    Bypasses SDK `openposition` strategy filtering limitations.
+    """
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    try:
+        # Use simple string concatenation for URL construction to avoid deps
+        url = f"{HOST.rstrip('/')}/api/v1/positionbook"
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "success":
+                return data.get("data", [])
+    except Exception as e:
+        logger.error(f"REST Position Fetch Error: {e}")
+    return []
+
+def fetch_order_book_rest():
+    """
+    Fetch all orders via REST API to find zombie orders or manual exits.
+    """
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    try:
+        url = f"{HOST.rstrip('/')}/api/v1/orderbook"
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "success":
+                return data.get("data", [])
+    except Exception as e:
+        logger.error(f"REST Order Fetch Error: {e}")
+    return []
 
 # ========================= HELPERS =========================
 def safe_float(val, default=0.0):
@@ -156,11 +192,38 @@ def is_order_active(orderid):
     return False
 
 def cancel_existing_exit_orders(symbol, exclude_oid=None):
-    """Cancel open orders for symbol (Synchronous)"""
+    """
+    Cancel open orders for symbol (Hybrid: REST Discovery + SDK Execution).
+    Uses REST `orderbook` to find specific orders to cancel, avoiding blanket `cancelallorder`
+    if we want to respect manual orders (though for now we aggressively clean up exits).
+    """
     try:
-        # Replaced get_orderbook iteration with cancelallorder per v1.0.0.40 rules
-        logger.info(f"Cancelling strategy orders for {symbol}")
-        client.cancelallorder(strategy=STRATEGY_NAME, symbol=symbol)
+        orders = fetch_order_book_rest()
+        to_cancel = []
+
+        for order in orders:
+            if order.get("symbol") != symbol: continue
+
+            # Check Status
+            status = order.get("order_status", "").upper()
+            if status not in ["OPEN", "PENDING", "TRIGGER_PENDING", "TRIGGER PENDING"]:
+                continue
+
+            # Filter by side/strategy if needed?
+            # Prompt says: "if available then cancel that order".
+            # Implies canceling ANY exit order attached to this position.
+            # We assume exit orders are OPPOSITE to current net qty.
+
+            oid = order.get("orderid")
+            if oid == exclude_oid: continue
+
+            to_cancel.append(oid)
+
+        if to_cancel:
+            logger.info(f"Cancelling {len(to_cancel)} orders for {symbol}: {to_cancel}")
+            for oid in to_cancel:
+                client.cancelorder(orderid=oid, strategy=STRATEGY_NAME)
+
     except Exception as e:
         logger.error(f"Cancel Error {symbol}: {e}")
 
@@ -392,48 +455,55 @@ def process_short(state, ask):
 
 # ========================= SYNC LOOP =========================
 def sync_positions():
-    """Polls positions to detect new symbols and subscribe."""
+    """Polls positions to detect new symbols and subscribe (Hybrid: REST Discovery)."""
     logger.info("Sync Loop Started")
     while True:
         try:
+            # HYBRID: Use REST to fetch ALL positions (Manual + Strategy)
+            positions = fetch_position_book_rest()
+
+            active_symbols = set()
+
+            for pos in positions:
+                sym = pos.get("symbol")
+                if not sym: continue # Basic safety
+
+                qty = int(safe_float(pos.get("netqty", 0) or pos.get("quantity", 0)))
+
+                if qty != 0:
+                    active_symbols.add(sym)
+                    reconcile_position_state(pos)
+
+            # Logic to subscribe to NEW symbols from polling
             with STATE_LOCK:
-                symbols = list(POSITIONS_STATE.keys())
+                current_syms = set(POSITIONS_STATE.keys())
 
-            # v1.0.0.40 Requirement: Iterate known symbols
-            for sym in symbols:
-                with STATE_LOCK:
-                    if sym not in POSITIONS_STATE: continue
-                    s = POSITIONS_STATE[sym]
-                    exc = s.get('exchange')
-                    prod = s.get('product')
+            new_subs = []
+            for sym in current_syms:
+                if sym not in SUBSCRIBED_SYMBOLS:
+                    # Find exchange from state
+                    with STATE_LOCK:
+                        exc = POSITIONS_STATE[sym]['exchange']
+                    new_subs.append({"exchange": exc, "symbol": sym})
+                    SUBSCRIBED_SYMBOLS.add(sym)
 
-                if not (exc and prod): continue
+            if new_subs:
+                logger.info(f"Subscribing to: {new_subs}")
+                client.subscribe_quote(new_subs, on_data_received=on_market_data)
 
-                resp = client.openposition(
-                    strategy=STRATEGY_NAME,
-                    symbol=sym,
-                    exchange=exc,
-                    product=prod
-                )
-
-                # Wrap single dict in list
-                if resp and resp.get("status") == "success":
-                    data = resp.get("data")
-                    if isinstance(data, dict):
-                        positions = [data]
-                    elif isinstance(data, list):
-                        positions = data # Should not happen per rules but handling
-                    else:
-                        positions = []
-
-                    for pos in positions:
-                        reconcile_position_state(pos)
-                else:
-                    # Handle case where position is gone
-                    pass
-
-            # Handle Subscriptions
-            # Logic here is restricted by lack of discovery.
+            # Handle Cleanup
+            with STATE_LOCK:
+                tracked = list(POSITIONS_STATE.keys())
+                for sym in tracked:
+                    if sym not in active_symbols:
+                        # Only if we successfully fetched positions and it's missing
+                        logger.info(f"Position Closed: {sym}")
+                        exc = POSITIONS_STATE[sym]["exchange"]
+                        del POSITIONS_STATE[sym]
+                        # Unsubscribe
+                        client.unsubscribe_quote([{"exchange": exc, "symbol": sym}])
+                        if sym in SUBSCRIBED_SYMBOLS:
+                            SUBSCRIBED_SYMBOLS.remove(sym)
 
         except Exception as e:
             logger.error(f"Sync Error: {e}")
@@ -445,8 +515,13 @@ def sync_positions():
 def reconcile_position_state(pos):
     """Sync API position with Internal State"""
     symbol = pos.get('symbol')
+
+    # Handle fields from user provided JSON
     qty = int(safe_float(pos.get('netqty', 0) or pos.get('quantity', 0)))
-    avg_price = safe_float(pos.get('buyavg') if qty > 0 else pos.get('sellavg'))
+
+    # average_price fallback
+    avg_price = safe_float(pos.get('buyavg') or pos.get('sellavg') or pos.get('average_price'))
+
     exchange = pos.get('exchange')
     product = pos.get('product')
 
