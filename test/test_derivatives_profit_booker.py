@@ -96,7 +96,7 @@ class TestSDKStrategy(unittest.TestCase):
         strategy.client.placeorder.assert_called()
 
         # Verify REST-based cancel logic
-        strategy.client.cancelorder.assert_called_with(orderid="EXIT_OID", strategy=strategy.STRATEGY_NAME)
+        strategy.client.cancelorder.assert_called_with(order_id="EXIT_OID", strategy=strategy.STRATEGY_NAME)
 
     @patch('strategies.derivatives_profit_booker.requests.get')
     def test_short_trigger_and_trail(self, mock_get):
@@ -152,7 +152,7 @@ class TestSDKStrategy(unittest.TestCase):
         strategy.on_market_data(msg)
 
         # Should verify status
-        strategy.client.orderstatus.assert_called_with(orderid="DEAD_OID", strategy=strategy.STRATEGY_NAME)
+        strategy.client.orderstatus.assert_called_with(order_id="DEAD_OID", strategy=strategy.STRATEGY_NAME)
 
         # Should NOT modify
         strategy.client.modifyorder.assert_not_called()
@@ -191,7 +191,7 @@ class TestSDKStrategy(unittest.TestCase):
         strategy.on_market_data(msg)
 
         # Assert Cancel called for specific OID (REST Logic)
-        strategy.client.cancelorder.assert_called_with(orderid="MANUAL_OID", strategy=strategy.STRATEGY_NAME)
+        strategy.client.cancelorder.assert_called_with(order_id="MANUAL_OID", strategy=strategy.STRATEGY_NAME)
 
         # Assert Place called
         strategy.client.placeorder.assert_called()

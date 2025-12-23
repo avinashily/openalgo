@@ -182,7 +182,7 @@ def is_order_active(orderid):
     """Check if order is OPEN or PENDING via Broker API"""
     if not orderid: return False
     try:
-        resp = client.orderstatus(orderid=orderid, strategy=STRATEGY_NAME)
+        resp = client.orderstatus(order_id=orderid, strategy=STRATEGY_NAME)
         if resp and resp.get("status") == "success":
             data = resp.get("data", resp)
             status = data.get("order_status", "").upper()
@@ -222,7 +222,7 @@ def cancel_existing_exit_orders(symbol, exclude_oid=None):
         if to_cancel:
             logger.info(f"Cancelling {len(to_cancel)} orders for {symbol}: {to_cancel}")
             for oid in to_cancel:
-                client.cancelorder(orderid=oid, strategy=STRATEGY_NAME)
+                client.cancelorder(order_id=oid, strategy=STRATEGY_NAME)
 
     except Exception as e:
         logger.error(f"Cancel Error {symbol}: {e}")
