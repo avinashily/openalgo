@@ -27,8 +27,11 @@ class TestSDKStrategy(unittest.TestCase):
         })
         strategy.client.modifyorder = MagicMock(return_value={'status': 'success'})
         strategy.client.cancelorder = MagicMock(return_value={'status': 'success'})
+        strategy.client.cancelallorder = MagicMock(return_value={'status': 'success'})
         strategy.client.get_orderbook = MagicMock(return_value={'status': 'success', 'data': []})
         strategy.client.orderstatus = MagicMock(return_value={'status': 'success', 'data': {'order_status': 'OPEN'}})
+        # Mock openposition for sync logic tests if any
+        strategy.client.openposition = MagicMock(return_value={'status': 'success', 'data': []})
 
     def test_reconcile_new_short(self):
         """Test reconciling a new short position fetches margin (Sync)"""
@@ -64,7 +67,8 @@ class TestSDKStrategy(unittest.TestCase):
         strategy.on_market_data(msg_high)
 
         strategy.client.placeorder.assert_called()
-        # Verify args if needed, but existence implies trigger
+        # Verify cancelallorder called
+        strategy.client.cancelallorder.assert_called_with(strategy=strategy.STRATEGY_NAME, symbol=symbol)
 
     def test_short_trigger_and_trail(self):
         """Test Short Logic: Trigger -> SL Placement -> Trailing"""
@@ -75,7 +79,8 @@ class TestSDKStrategy(unittest.TestCase):
             "margin": 100000.0, "active_oid": None
         }
 
-        # Target 0.65% -> 650. Trigger Price <= 87.0
+        # Target 0.65% -> 650.
+        # Trigger Price 80.0 (Huge Profit)
 
         # 1. Trigger
         msg_trigger = {"data": {"symbol": symbol, "depth": {"buy": [], "sell": [{"price": 80.0}]}}}
@@ -112,7 +117,7 @@ class TestSDKStrategy(unittest.TestCase):
         strategy.on_market_data(msg)
 
         # Should verify status
-        strategy.client.orderstatus.assert_called_with(orderid="DEAD_OID")
+        strategy.client.orderstatus.assert_called_with(orderid="DEAD_OID", strategy=strategy.STRATEGY_NAME)
 
         # Should NOT modify
         strategy.client.modifyorder.assert_not_called()
@@ -122,7 +127,7 @@ class TestSDKStrategy(unittest.TestCase):
         self.assertIsNone(strategy.POSITIONS_STATE[symbol]['active_oid'])
 
     def test_future_cancels_manual_order(self):
-        """Test Future logic cancels manual order"""
+        """Test Future logic cancels manual/strategy orders"""
         symbol = "TEST26FEB24FUT"
         strategy.POSITIONS_STATE[symbol] = {
             'symbol': symbol, 'exchange': 'NFO', 'product': 'MIS',
@@ -130,20 +135,17 @@ class TestSDKStrategy(unittest.TestCase):
             'active_oid': None, 'state': 'TRACKING', 'is_future': True
         }
 
-        # Mock existing manual order in Broker Response
-        strategy.client.get_orderbook.return_value = {
-            'status': 'success',
-            'data': [{'orderid': 'MANUAL_OID', 'symbol': symbol, 'status': 'OPEN'}]
-        }
-
         # Future Target 3% of Margin 100k = 3000.
-        # Profit = (131 - 100) * 100 = 3100. Trigger!
-        msg = {"data": {"symbol": symbol, "depth": {"buy": [{"price": 131.0}], "sell": []}}}
+        # But NEAR_TARGET_PCT changed to 4.0% in recent update.
+        # Target = 4000.
+        # Profit = (141 - 100) * 100 = 4100. Trigger!
+
+        msg = {"data": {"symbol": symbol, "depth": {"buy": [{"price": 141.0}], "sell": []}}}
 
         strategy.on_market_data(msg)
 
-        # Assert Cancel called for MANUAL_OID
-        strategy.client.cancelorder.assert_called_with(orderid="MANUAL_OID")
+        # Assert CancelALL called
+        strategy.client.cancelallorder.assert_called_with(strategy=strategy.STRATEGY_NAME, symbol=symbol)
 
         # Assert Place called
         strategy.client.placeorder.assert_called()

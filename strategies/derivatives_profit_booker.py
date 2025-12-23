@@ -33,9 +33,9 @@ except ImportError:
         def placeorder(self, *args, **kwargs): pass
         def modifyorder(self, *args, **kwargs): pass
         def cancelorder(self, *args, **kwargs): pass
+        def cancelallorder(self, *args, **kwargs): pass
         def orderstatus(self, *args, **kwargs): return {"status": "success", "data": {"order_status": "open"}}
-        def get_positions(self): return {"status": "success", "data": []}
-        def get_orderbook(self): return {"status": "success", "data": []}
+        def openposition(self, *args, **kwargs): return {"status": "success", "data": []} # v1.0.0.40 compliant
 
 # ========================= CONFIGURATION =========================
 STRATEGY_NAME = "DerivativesProfitBooker"
@@ -63,7 +63,7 @@ POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 5))
 
 # Constants
 NEAR_EXPIRY_DAYS = 30
-NEAR_TARGET_PCT = 3.0
+NEAR_TARGET_PCT = 4.0
 FAR_TARGET_PCT = 50.0
 SPECIAL_QTY_THRESHOLD = 600
 SPECIAL_POINTS_CAP = 400.0
@@ -146,7 +146,7 @@ def is_order_active(orderid):
     """Check if order is OPEN or PENDING via Broker API"""
     if not orderid: return False
     try:
-        resp = client.orderstatus(orderid=orderid)
+        resp = client.orderstatus(orderid=orderid, strategy=STRATEGY_NAME)
         if resp and resp.get("status") == "success":
             data = resp.get("data", resp)
             status = data.get("order_status", "").upper()
@@ -158,17 +158,9 @@ def is_order_active(orderid):
 def cancel_existing_exit_orders(symbol, exclude_oid=None):
     """Cancel open orders for symbol (Synchronous)"""
     try:
-        ob = client.get_orderbook()
-        orders = ob.get("data", [])
-        if isinstance(orders, dict) and 'orders' in orders: orders = orders['orders']
-
-        for o in orders:
-            if o.get("symbol") == symbol and o.get("status") in ["OPEN", "PENDING", "TRIGGER_PENDING"]:
-                oid = o.get("orderid")
-                if exclude_oid and oid == exclude_oid: continue
-
-                logger.info(f"Cancelling stale order {oid} for {symbol}")
-                client.cancelorder(orderid=oid)
+        # Replaced get_orderbook iteration with cancelallorder per v1.0.0.40 rules
+        logger.info(f"Cancelling strategy orders for {symbol}")
+        client.cancelallorder(strategy=STRATEGY_NAME, symbol=symbol)
     except Exception as e:
         logger.error(f"Cancel Error {symbol}: {e}")
 
@@ -404,15 +396,23 @@ def sync_positions():
     logger.info("Sync Loop Started")
     while True:
         try:
-            resp = client.get_positions()
+            resp = client.openposition(strategy=STRATEGY_NAME)
             if resp and resp.get("status") == "success":
-                positions = resp.get("data", [])
+                data = resp.get("data")
+                if isinstance(data, dict):
+                    positions = [data]
+                elif isinstance(data, list):
+                    positions = data
+                else:
+                    positions = []
 
                 active_symbols = set()
                 to_subscribe = []
 
                 for pos in positions:
                     sym = pos.get("symbol")
+                    if not sym: continue # Basic safety
+
                     qty = int(safe_float(pos.get("netqty", 0) or pos.get("quantity', 0")))
 
                     if qty != 0:
@@ -448,7 +448,7 @@ def sync_positions():
 
 def reconcile_position_state(pos):
     """Sync API position with Internal State"""
-    symbol = pos['symbol']
+    symbol = pos.get('symbol')
     qty = int(safe_float(pos.get('netqty', 0) or pos.get('quantity', 0)))
     avg_price = safe_float(pos.get('buyavg') if qty > 0 else pos.get('sellavg'))
     exchange = pos.get('exchange')
