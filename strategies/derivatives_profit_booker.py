@@ -78,16 +78,14 @@ def is_future_symbol(symbol):
     return bool(FUTURE_REGEX.match(symbol))
 
 def update_targets(state):
-    """Pre-calculate static target PRICE based on current state."""
+    """Pre-calculate static target PRICE based on current state & time."""
     symbol = state["symbol"]
     avg = state["avg_price"]
     qty = state["qty"]
     margin = state.get("margin", 0.0)
     is_fut = state.get("is_future", False)
 
-    # Defaults
-    state["base_target_price"] = 0.0 # For Long Options (before cap)
-    state["target_price"] = 0.0      # For Shorts/Futures (Trigger Price)
+    state["target_price"] = 0.0
 
     if avg <= 0: return
 
@@ -95,7 +93,14 @@ def update_targets(state):
     if not is_fut and qty > 0:
         days = get_days_to_expiry(symbol)
         target_pct = NEAR_TARGET_PCT if days <= NEAR_EXPIRY_DAYS else FAR_TARGET_PCT
-        state["base_target_price"] = avg * (1 + target_pct / 100.0)
+        target_price = avg * (1 + target_pct / 100.0)
+
+        # Cap Logic
+        now = datetime.now(IST)
+        if qty > SPECIAL_QTY_THRESHOLD and now.hour >= 15:
+            target_price = min(target_price, avg + SPECIAL_POINTS_CAP)
+
+        state["target_price"] = target_price
 
     # 2. Futures (Any Qty)
     elif is_fut:
@@ -290,16 +295,10 @@ async def process_future(state, bid, ask):
 async def process_long(state, bid):
     if bid <= 0: return
     symbol = state["symbol"]
-    avg = state["avg_price"]
     qty = state["qty"]
+    target_price = state.get("target_price", 0.0)
 
-    target_price = state.get("base_target_price", 0.0)
     if target_price <= 0: return
-
-    # Cap Logic (Dynamic)
-    now = datetime.now(IST)
-    if qty > SPECIAL_QTY_THRESHOLD and now.hour >= 15:
-        target_price = min(target_price, avg + SPECIAL_POINTS_CAP)
 
     if bid >= target_price:
         if state["state"] == "PLACED": return
@@ -473,7 +472,9 @@ async def reconcile_position_state(pos):
                 state['state'] = 'TRACKING'
                 if qty_changed:
                      state['margin'] = 0.0 # Force re-fetch
-                update_targets(state)
+
+            # Always update targets (to handle time-based cap logic)
+            update_targets(state)
 
     # Handle Margin Fetch outside lock to allow concurrency
     need_margin = False

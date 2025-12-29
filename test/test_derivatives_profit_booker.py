@@ -63,8 +63,8 @@ class TestAsyncStrategy(unittest.IsolatedAsyncioTestCase):
         }
         # Run update_targets
         strategy.update_targets(state)
-        # Verify base target (Far Target 50% since no date match)
-        self.assertEqual(state['base_target_price'], 150.0)
+        # Verify target (Far Target 50% since no date match)
+        self.assertEqual(state['target_price'], 150.0)
 
         strategy.POSITIONS_STATE[symbol] = state
 
