@@ -221,9 +221,14 @@ class AsyncApiClient:
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(f"API RESP {endpoint} [{resp.status_code}]: {resp.text}")
 
-                if resp.status_code == 200:
-                    return resp.json()
-                return None
+                if resp.status_code != 200:
+                    logger.error(f"API Request Failed [{endpoint}]: Status {resp.status_code}")
+                    logger.error(f"Response: {resp.text}")
+                    logger.error(f"Payload: {json.dumps(payload)}")
+                    try: return resp.json()
+                    except: return None
+
+                return resp.json()
             except Exception as e:
                 logger.error(f"API Error {endpoint}: {e}")
                 return None
@@ -403,6 +408,8 @@ async def process_future(state, bid, ask):
             async with STATE_LOCK:
                 state["state"] = "PLACED"
                 state["active_oid"] = resp.get("orderid")
+        else:
+            logger.error(f"Order Placement Failed {symbol}. Response: {resp}")
 
 async def process_long(state, bid):
     """Checks Profit Target for LONG OPTIONS."""
@@ -433,6 +440,8 @@ async def process_long(state, bid):
             async with STATE_LOCK:
                 state["state"] = "PLACED"
                 state["active_oid"] = resp.get("orderid")
+        else:
+            logger.error(f"Order Placement Failed {symbol}. Response: {resp}")
 
 async def process_short(state, ask):
     """Checks Profit Target for SHORT OPTIONS (uses Trailing SL)."""
@@ -472,6 +481,8 @@ async def process_short(state, ask):
                     state["active_oid"] = resp.get("orderid")
                     state["last_trigger"] = trigger_price
                     state["lowest_ask"] = ask
+            else:
+                logger.error(f"Order Placement Failed {symbol}. Response: {resp}")
 
         # Phase 2: Trailing Logic -> Move SL down if price drops
         elif state["state"] == "TRAILING":
