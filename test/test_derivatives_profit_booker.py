@@ -140,9 +140,9 @@ class TestAsyncStrategy(unittest.IsolatedAsyncioTestCase):
             'active_oid': None, 'state': 'TRACKING', 'is_future': True
         }
         strategy.update_targets(state)
-        # Futures Target 10% of 100k = 10,000.
-        # Target Price = 100 + (10000 / 100) = 200.0
-        self.assertEqual(state['target_price'], 200.0)
+        # Futures Target 3.5% of 100k = 3500.
+        # Target Price = 100 + (3500 / 100) = 135.0
+        self.assertEqual(state['target_price'], 135.0)
 
         strategy.POSITIONS_STATE[symbol] = state
 

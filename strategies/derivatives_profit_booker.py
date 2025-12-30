@@ -65,26 +65,26 @@ API_KEY = os.getenv('OPENALGO_APIKEY')
 HOST = os.getenv('HOST_SERVER', 'http://127.0.0.1:5000')
 
 # Polling Intervals (in seconds):
-# How often to check for new/closed positions (e.g., every 5 seconds)
-POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 5))
-# How often to check market prices (e.g., every 15 seconds)
-MARKET_POLL_INTERVAL = int(os.getenv('MARKET_POLL_INTERVAL', 15))
+# How often to check for new/closed positions (e.g., every 10 seconds)
+POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 10))
+# How often to check market prices (e.g., every 5 seconds)
+MARKET_POLL_INTERVAL = int(os.getenv('MARKET_POLL_INTERVAL', 5))
 
 # Profit Targets:
 # ----------------
 # NEAR_EXPIRY_DAYS: If an option expires in less than this many days, it's "Near Term".
 NEAR_EXPIRY_DAYS = 45
 
-# NEAR_TARGET_PCT: Profit target % for Near Term options and Futures (e.g., 10%).
-NEAR_TARGET_PCT = 10.0
+# NEAR_TARGET_PCT: Profit target % for Near Term options and Futures (e.g., 3.5%).
+NEAR_TARGET_PCT = 3.5
 
 # FAR_TARGET_PCT: Profit target % for Far Term options (e.g., 50%).
 FAR_TARGET_PCT = 50.0
 
 # Special Logic for Large Quantities (3 PM Rule):
-# If quantity > 600 AND time is after 3:00 PM, cap the profit points to 400.
-SPECIAL_QTY_THRESHOLD = 600
-SPECIAL_POINTS_CAP = 400.0
+# If quantity > 450 AND time is after 3:00 PM, cap the profit points to 250.
+SPECIAL_QTY_THRESHOLD = 450
+SPECIAL_POINTS_CAP = 250.0
 
 # Short Selling Targets (based on Margin Utilized):
 SHORT_TARGET_MARGIN_PCT = 0.65  # Target 0.65% return on margin
