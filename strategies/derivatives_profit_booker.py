@@ -387,7 +387,7 @@ async def process_future(state, bid, ask):
         logger.info(f"FUTURE TRIGGER {symbol}: Price {current_price} hit Target {target_price}")
 
         # Cancel old exits & Place new Limit Order
-        await cancel_existing_exit_orders(symbol)
+        # await cancel_existing_exit_orders(symbol)
 
         resp = await api.place_order(
             symbol=symbol,
@@ -418,7 +418,7 @@ async def process_long(state, bid):
         if state["active_oid"] and await is_order_active(state["active_oid"]): return
 
         logger.info(f"LONG TRIGGER {symbol}: Bid {bid} >= Target {target_price}")
-        await cancel_existing_exit_orders(symbol)
+        # await cancel_existing_exit_orders(symbol)
 
         resp = await api.place_order(
             symbol=symbol,
@@ -455,7 +455,7 @@ async def process_short(state, ask):
             lock_dist = lock_amt / qty
             trigger_price = avg - lock_dist
 
-            await cancel_existing_exit_orders(symbol)
+            # await cancel_existing_exit_orders(symbol)
             resp = await api.place_order(
                 symbol=symbol,
                 exchange=state["exchange"],
