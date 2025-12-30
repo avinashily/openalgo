@@ -516,9 +516,19 @@ async def process_market_data(symbol, depth_data):
             state = POSITIONS_STATE[symbol]
 
         # Parse depth
-        depth = depth_data.get("depth", {})
-        bids = depth.get("buy", [])
-        asks = depth.get("sell", [])
+        # REST API returns 'bids' and 'asks' directly. WebSocket might use 'depth' -> 'buy'/'sell'.
+        # We check both to be robust.
+
+        bids = depth_data.get("bids") or depth_data.get("buy")
+        asks = depth_data.get("asks") or depth_data.get("sell")
+
+        if not bids and "depth" in depth_data:
+            d = depth_data["depth"]
+            bids = d.get("bids") or d.get("buy")
+            asks = d.get("asks") or d.get("sell")
+
+        bids = bids or []
+        asks = asks or []
 
         best_bid = safe_float(bids[0].get("price")) if bids else 0.0
         best_ask = safe_float(asks[0].get("price")) if asks else 0.0

@@ -74,7 +74,7 @@ class TestAsyncStrategy(unittest.IsolatedAsyncioTestCase):
         ]
 
         # Price 151.0 -> Trigger.
-        depth_data = {"depth": {"buy": [{"price": 151.0}], "sell": []}}
+        depth_data = {"bids": [{"price": 151.0}], "asks": []}
         await strategy.process_market_data(symbol, depth_data)
 
         strategy.api.place_order.assert_called()
@@ -92,7 +92,7 @@ class TestAsyncStrategy(unittest.IsolatedAsyncioTestCase):
         strategy.POSITIONS_STATE[symbol] = state
 
         # Trigger
-        depth_data = {"depth": {"buy": [], "sell": [{"price": 80.0}]}}
+        depth_data = {"bids": [], "asks": [{"price": 80.0}]}
         await strategy.process_market_data(symbol, depth_data)
 
         strategy.api.place_order.assert_called()
@@ -103,7 +103,7 @@ class TestAsyncStrategy(unittest.IsolatedAsyncioTestCase):
         strategy.POSITIONS_STATE[symbol]['last_trigger'] = 89.0
         strategy.POSITIONS_STATE[symbol]['lowest_ask'] = 80.0
 
-        depth_trail = {"depth": {"buy": [], "sell": [{"price": 79.5}]}}
+        depth_trail = {"bids": [], "asks": [{"price": 79.5}]}
         await strategy.process_market_data(symbol, depth_trail)
 
         strategy.api.modify_order.assert_called_once()
@@ -124,7 +124,7 @@ class TestAsyncStrategy(unittest.IsolatedAsyncioTestCase):
         # Mock status as COMPLETE (Dead)
         strategy.api.order_status.return_value = {'status': 'success', 'data': {'order_status': 'COMPLETE'}}
 
-        depth_data = {"depth": {"buy": [], "sell": [{"price": 79.5}]}}
+        depth_data = {"bids": [], "asks": [{"price": 79.5}]}
         await strategy.process_market_data(symbol, depth_data)
 
         strategy.api.order_status.assert_called_with("DEAD_OID")
@@ -151,7 +151,7 @@ class TestAsyncStrategy(unittest.IsolatedAsyncioTestCase):
         ]
 
         # Profit (250-100)*100 = 15,000 > 10,000.
-        depth_data = {"depth": {"buy": [{"price": 250.0}], "sell": []}}
+        depth_data = {"bids": [{"price": 250.0}], "asks": []}
         await strategy.process_market_data(symbol, depth_data)
 
         strategy.api.cancel_order.assert_called_with("MANUAL_OID")
