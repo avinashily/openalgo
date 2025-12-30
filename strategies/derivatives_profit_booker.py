@@ -295,8 +295,8 @@ class AsyncApiClient:
             "action": "SELL",
             "exchange": exchange,
             "product": product,
-            "quantity": abs(quantity),
-            "price_type": "MARKET"
+            "quantity": int(abs(quantity)),
+            "pricetype": "MARKET"
         }
         resp = await self.place_order(**payload)
         if resp:
@@ -398,9 +398,9 @@ async def process_future(state, bid, ask):
             symbol=symbol,
             exchange=state["exchange"],
             action=exit_action,
-            quantity=abs(qty),
+            quantity=int(abs(qty)),
             product=state["product"],
-            price_type="LIMIT",
+            pricetype="LIMIT",
             price=current_price
         )
 
@@ -431,9 +431,9 @@ async def process_long(state, bid):
             symbol=symbol,
             exchange=state["exchange"],
             action="SELL",
-            quantity=qty,
+            quantity=int(qty),
             product=state["product"],
-            price_type="LIMIT",
+            pricetype="LIMIT",
             price=bid
         )
         if resp and resp.get("status") == "success":
@@ -469,9 +469,9 @@ async def process_short(state, ask):
                 symbol=symbol,
                 exchange=state["exchange"],
                 action="BUY",
-                quantity=qty,
+                quantity=int(qty),
                 product=state["product"],
-                price_type="SL-M",
+                pricetype="SL-M",
                 trigger_price=round(trigger_price, 1),
                 tag="OPB"
             )
@@ -505,10 +505,10 @@ async def process_short(state, ask):
                     resp = await api.modify_order(
                         orderid=state["active_oid"],
                         trigger_price=round(new_trigger, 1),
-                        price_type="SL-M",
+                        pricetype="SL-M",
                         symbol=symbol,
                         exchange=state["exchange"],
-                        quantity=qty,
+                        quantity=int(qty),
                         product=state["product"]
                     )
                     if resp and resp.get("status") == "success":
